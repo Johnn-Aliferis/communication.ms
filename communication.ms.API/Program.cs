@@ -1,3 +1,4 @@
+using communication.ms.API.Exceptions;
 using communication.ms.API.Service;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -21,6 +22,10 @@ if (app.Environment.IsDevelopment())
     app.UseSwagger();
     app.UseSwaggerUI();
 }
+
+
+//Middleware for global exception handling.
+app.UseMiddleware<ExceptionHandlingMiddleware>();
 
 app.UseHttpsRedirection();
 
