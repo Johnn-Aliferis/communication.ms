@@ -80,6 +80,7 @@ namespace communication.ms.API.Service
         {
             string body = communicationDTO.OrderId + communicationDTO.StatusToEmit;
 
+            // Creating scoped service -- tied to each message processing - Stateful.
             using var scope = _serviceProvider.CreateScope();
             var mailSender = scope.ServiceProvider.GetRequiredService<IMailSenderService>();
 
