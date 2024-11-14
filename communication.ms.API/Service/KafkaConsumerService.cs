@@ -48,7 +48,8 @@ namespace communication.ms.API.Service
 
             while (!cancellationToken.IsCancellationRequested)
             {
-                await ConsumeAndProcessMessage(cancellationToken);
+                // start a new task to not handle messages sequentually.Allow parallel processing of messages.
+                _ = Task.Run(() => ConsumeAndProcessMessage(cancellationToken), cancellationToken);
             }
         }
 
