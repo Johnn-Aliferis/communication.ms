@@ -1,8 +1,8 @@
 ﻿
 using communication.ms.API.Configuration;
 using communication.ms.API.DTO;
-using communication.ms.API.Exception;
 using Confluent.Kafka;
+using System.Reactive.Linq;
 
 namespace communication.ms.API.Service
 {
@@ -11,8 +11,11 @@ namespace communication.ms.API.Service
         private readonly IConsumer<string, CommunicationDTO> _consumer;
         private readonly ILogger<KafkaConsumerService> _logger;
         private readonly IServiceProvider _serviceProvider;
+        private IDisposable? _subscription;
+        private readonly int _parrallelMessagesAllowed = 5;
 
-        public KafkaConsumerService(ILogger<KafkaConsumerService> logger, IConfiguration configuration, IServiceProvider serviceProvider)
+        public KafkaConsumerService(ILogger<KafkaConsumerService> logger, IConfiguration configuration,
+            IServiceProvider serviceProvider)
         {
             var consumerConfig = new ConsumerConfig
             {
@@ -30,51 +33,75 @@ namespace communication.ms.API.Service
         }
 
         // Starts during application start-up
-        public async Task StartAsync(CancellationToken cancellationToken)
-        {
-            await Task.Run(() => StartConsumerLoop(cancellationToken), cancellationToken);
-        }
-
-        public Task StopAsync(CancellationToken cancellationToken)
-        {
-            _consumer.Close();
-            _consumer.Dispose();
-            return Task.CompletedTask;
-        }
-
-        private async Task StartConsumerLoop(CancellationToken cancellationToken)
+        public Task StartAsync(CancellationToken cancellationToken)
         {
             _consumer.Subscribe("notification-topic"); // Should be passed down from enviromental variables.
 
-            while (!cancellationToken.IsCancellationRequested)
-            {
-                // start a new task to not handle messages sequentually.Allow parallel processing of messages.
-                _ = Task.Run(() => ConsumeAndProcessMessage(cancellationToken), cancellationToken);
-            }
+            _subscription = Observable
+                    .Create<ConsumeResult<string, CommunicationDTO>>(observer =>
+                         {  
+                             var task = Task.Run(() =>
+                             {
+                                 try
+                                 {
+                                     while (!cancellationToken.IsCancellationRequested)
+                                     {
+                                         try
+                                         {
+                                             var consumeResult = _consumer.Consume(cancellationToken);
+                                             if (consumeResult != null)
+                                             {
+                                                 observer.OnNext(consumeResult);
+                                             }
+                                         }
+                                         catch (ConsumeException ex)
+                                         {
+                                             _logger.LogError("Kafka consume error: {Message}", ex.Message);
+                                         }
+                                     }
+                                 }
+                                 catch (OperationCanceledException)
+                                 {
+                                     observer.OnCompleted();
+                                 }
+                             }, cancellationToken);
+
+                             return () => { /* Instead of returning null */ };
+                             })
+                    .Where(result => result?.Message?.Value != null)
+                    .Select(result => Observable.FromAsync(async () =>
+                    {
+                        await SendEmailTempImplementationAsync(result.Message.Value.StatusToEmit);
+                        return result;
+                    }))
+                    .Merge(_parrallelMessagesAllowed)
+                    .Subscribe(
+                        _ => _logger.LogInformation("Email sent successfully"), // first for onSuccess
+                        ex => _logger.LogError("Error processing message: {Message}", ex.Message) // second for OnError.
+                    );
+            return Task.CompletedTask;
         }
 
-        private async Task ConsumeAndProcessMessage(CancellationToken cancellationToken)
+        private async Task SendEmailTempImplementationAsync(string message)
+        {
+            await Task.Delay(100);
+            _logger.LogInformation("Email sent with status: {Message}", message);
+        }
+
+
+        public Task StopAsync(CancellationToken cancellationToken)
         {
             try
             {
-                var result = _consumer.Consume(cancellationToken);
-                if (result?.Message?.Value != null)
-                {
-                    await SendEmail(result.Message.Value);
-                }
-                else
-                {
-                    throw new InvalidMessageException("Invalid message received from Kafka");
-                }
+                _consumer.Close();
+                _consumer.Dispose();
+                _subscription?.Dispose();
             }
-            catch (ConsumeException e)
+            catch (System.Exception e)
             {
-                _logger.LogError("Error consuming message: {Message}", e.Message);
+                _logger.LogError("Error: {Message}", e.Message);
             }
-            catch (InvalidMessageException ex)
-            {
-                _logger.LogError("Invalid message error: {Message}", ex.Message);
-            }
+            return Task.CompletedTask;
         }
 
         private async Task SendEmail(CommunicationDTO communicationDTO)
